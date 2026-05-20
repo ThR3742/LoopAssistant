@@ -46,30 +46,21 @@ def to_abc(progression: list[dict],
     lines = [
         f'X:1', f'T:{title}', f'M:{time_sig}',
         f'L:1/4', f'Q:1/4={tempo}', f'K:C',
+        f'%%barsperline 8',
+        f'%%stretchlast 0',
     ]
     for i in range(n):
         label = labels[i] if i < len(labels) else f'Voice {i+1}'
         clef = _clef_for_label(label)
         lines.append(f'V:{i+1} name="{label}" clef={clef}')
 
-    bars_per_line = 4
     for i in range(n):
         voice_bars = []
         for entry in progression:
             note = _midi_to_abc(entry['pitches'][i])
             prefix = f'"{entry["chord"]}"' if i == 0 else ''
             voice_bars.append(f'{prefix}{note}4')
-
-        # Split into rows of bars_per_line bars
-        rows = []
-        for start in range(0, len(voice_bars), bars_per_line):
-            chunk = voice_bars[start:start + bars_per_line]
-            end = '|]' if start + bars_per_line >= len(voice_bars) else '|'
-            rows.append(' | '.join(chunk) + ' ' + end)
-
-        prefix_v = f'[V:{i+1}] '
-        pad      = ' ' * len(prefix_v)
-        lines.append(prefix_v + f'\n{pad}'.join(rows))
+        lines.append(f'[V:{i+1}] ' + ' | '.join(voice_bars) + ' |]')
 
     return '\n'.join(lines)
 
