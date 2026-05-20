@@ -4,6 +4,15 @@ Generate ABC notation and MIDI from voiced progressions.
 
 from chords import midi_to_name
 
+# Instruments that use bass clef. Everything else defaults to treble.
+_BASS_CLEF_INSTRUMENTS = {
+    'cello', 'bass', 'contrebasse', 'tuba', 'bassoon', 'baritone',
+}
+
+
+def _clef_for_label(label: str) -> str:
+    return 'bass' if label.lower().strip() in _BASS_CLEF_INSTRUMENTS else 'treble'
+
 
 def _midi_to_abc(pitch: int) -> str:
     """Convert MIDI pitch to ABC note name with octave markers."""
@@ -34,18 +43,14 @@ def to_abc(progression: list[dict],
         return ''
 
     n = len(progression[0]['pitches'])
-    # Clef: voices whose median pitch is below C4 (60) go on bass clef
-    def clef_for(voice_idx: int) -> str:
-        pitches = [e['pitches'][voice_idx] for e in progression]
-        return 'bass' if sum(pitches) / len(pitches) < 60 else 'treble'
-
     lines = [
         f'X:1', f'T:{title}', f'M:{time_sig}',
         f'L:1/4', f'Q:1/4={tempo}', f'K:C',
     ]
     for i in range(n):
         label = labels[i] if i < len(labels) else f'Voice {i+1}'
-        lines.append(f'V:{i+1} name="{label}" clef={clef_for(i)}')
+        clef = _clef_for_label(label)
+        lines.append(f'V:{i+1} name="{label}" clef={clef}')
 
     for i in range(n):
         bars = []
