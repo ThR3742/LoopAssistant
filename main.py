@@ -2,12 +2,20 @@
 """
 LoopAssistant -- Voice leading generator for live loops.
 
+Each voice gets one note per chord. Voices are ordered from highest to lowest.
+Specify instruments to set realistic pitch ranges.
+
 Usage:
-  python main.py "Cm7 F7 Bbmaj7 Eb7"
-  python main.py "Dm7 G7 Cmaj7" --voices 2
-  python main.py "Dm7 G7 Cmaj7" --voices S,A,B --instruments "S=Violon bow,A=Alto,B=Bass"
-  python main.py --file grid.txt --voices 3 --midi out.mid
-  python main.py --ireal "irealb://..." --voices 4
+  python main.py "Cm7 F7 Bbmaj7" --voices 3
+  python main.py "Dm7 G7 Cmaj7"  --voices "violin,violin,bass"
+  python main.py "Dm7 G7 Cmaj7"  --voices "violin,cello,contrebasse"
+  python main.py --ireal "irealb://..." --voices 5
+  python main.py --file grid.txt --voices "flute,violin,viola,cello,bass"
+
+Available instruments (define pitch range):
+  violin, viola, cello, bass, contrebasse, guitar, piano,
+  flute, trumpet, saxophone, voice
+  (or use a number: --voices 3  for 3 generic voices)
 """
 
 import argparse
@@ -15,62 +23,65 @@ import sys
 import os
 
 from grid_parser import parse_grid
-from voice_leading import voice_progression, select_voices, ALL_VOICES
+from voice_leading import voice_progression, resolve_range, INSTRUMENT_RANGES
 from output import to_abc, to_midi, print_table
 
 
-def parse_voices_arg(raw: str) -> list[str]:
+def parse_voices_arg(raw: str) -> tuple[list[str], list[tuple[int, int]]]:
     """
-    Accept either a number ("3") or a comma-separated voice list ("S,A,B").
-    Returns a validated list of voice IDs.
+    Parse --voices argument. Returns (labels, ranges).
+    - "3"                       → 3 generic voices with default ranges
+    - "violin,violin,bass"      → 3 named voices with instrument ranges
+    - "violin,2,bass"           → mixed (numeric = generic range for that slot)
     """
-    raw = raw.strip()
-    if raw.isdigit():
-        n = int(raw)
-        if not 1 <= n <= 4:
-            raise ValueError(f"--voices must be between 1 and 4, got {n}")
-        return select_voices(n)
-    # Comma-separated list
-    ids = [v.strip().upper() for v in raw.split(',')]
-    for v in ids:
-        if v not in ALL_VOICES:
-            raise ValueError(f"Unknown voice '{v}'. Choose from {ALL_VOICES}")
-    return ids
+    parts = [p.strip() for p in raw.split(',')]
+
+    # Pure number: e.g. "3"
+    if len(parts) == 1 and parts[0].isdigit():
+        n = int(parts[0])
+        if n < 1:
+            raise ValueError("Need at least 1 voice.")
+        labels = [f'Voice {i+1}' for i in range(n)]
+        ranges = [resolve_range(None, i) for i in range(n)]
+        return labels, ranges
+
+    # List of instrument names (or numbers as slot indices)
+    labels, ranges = [], []
+    for i, p in enumerate(parts):
+        if p.isdigit():
+            labels.append(f'Voice {i+1}')
+            ranges.append(resolve_range(None, i))
+        else:
+            key = p.lower()
+            if key not in INSTRUMENT_RANGES:
+                print(f"Warning: unknown instrument '{p}', using default range.")
+            labels.append(p.capitalize())
+            ranges.append(resolve_range(p, i))
+    return labels, ranges
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LoopAssistant: generate voice leading from a chord grid',
+        description='LoopAssistant: voice leading for live loops',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-voices:
-  --voices 1       Single melody line (Soprano)
-  --voices 2       Two parts: Soprano + Bass
-  --voices 3       Three parts: Soprano + Alto + Bass  (default for 3)
-  --voices 4       Full SATB  (default)
-  --voices S,T,B   Custom selection of S A T B voices
-        """
+        epilog=__doc__,
     )
-    parser.add_argument('grid', nargs='?', help='Chord symbols (space separated)')
-    parser.add_argument('--file', '-f',   help='Read chord grid from file')
-    parser.add_argument('--ireal',        help='iReal Pro URL (irealb://...)')
-    parser.add_argument('--voices', '-v', default='4',
-                        help='Number of voices (1-4) or list e.g. S,A,B (default: 4)')
-    parser.add_argument('--abc',          help='Output ABC file (default: out.abc)')
-    parser.add_argument('--midi',         help='Output MIDI file (default: out.mid)')
-    parser.add_argument('--title',        default='Loop Assistant', help='Score title')
-    parser.add_argument('--tempo',        type=int, default=120, help='Tempo BPM')
-    parser.add_argument('--no-midi',      action='store_true', help='Skip MIDI output')
-    parser.add_argument(
-        '--instruments',
-        help='Label overrides per voice, e.g. "S=Violon bow,A=Alto,T=Cello,B=Contrebasse"'
-    )
+    parser.add_argument('grid', nargs='?', help='Chord symbols, space separated')
+    parser.add_argument('--file',   '-f',  help='Read grid from file')
+    parser.add_argument('--ireal',         help='iReal Pro URL (irealb://...)')
+    parser.add_argument('--voices', '-v',  default='4',
+                        help='Number of voices OR comma-separated instrument list')
+    parser.add_argument('--abc',           help='ABC output file (default: out.abc)')
+    parser.add_argument('--midi',          help='MIDI output file (default: out.mid)')
+    parser.add_argument('--title',         default='Loop Assistant')
+    parser.add_argument('--tempo',         type=int, default=120)
+    parser.add_argument('--no-midi',       action='store_true')
 
     args = parser.parse_args()
 
     # --- Voices ---
     try:
-        voices = parse_voices_arg(args.voices)
+        labels, ranges = parse_voices_arg(args.voices)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -79,8 +90,7 @@ voices:
     if args.ireal:
         source = args.ireal
     elif args.file:
-        with open(args.file) as fh:
-            source = fh.read()
+        source = open(args.file).read()
     elif args.grid:
         source = args.grid
     else:
@@ -90,54 +100,50 @@ voices:
             parser.print_help()
             sys.exit(1)
 
-    # --- Instruments ---
-    instruments = None
-    if args.instruments:
-        instruments = {}
-        for pair in args.instruments.split(','):
-            k, _, v = pair.partition('=')
-            instruments[k.strip().upper()] = v.strip()
-
     # --- Parse chords ---
     chords = parse_grid(source)
     if not chords:
-        print("ERROR: No chords found in input.", file=sys.stderr)
+        print("ERROR: No chords found.", file=sys.stderr)
         sys.exit(1)
 
     print(f"Chords  ({len(chords)}): {' | '.join(chords)}")
-    print(f"Voices  ({len(voices)}): {' '.join(voices)}\n")
+    print(f"Voices  ({len(labels)}): {' | '.join(labels)}\n")
 
     # --- Voice leading ---
-    progression = voice_progression(chords, voices=voices)
-    print_table(progression)
+    try:
+        progression = voice_progression(chords, ranges)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print_table(progression, labels)
     print()
 
-    # --- ABC output ---
+    # --- ABC ---
     abc_file = args.abc or 'out.abc'
     with open(abc_file, 'w') as fh:
-        fh.write(to_abc(progression, title=args.title, tempo=args.tempo,
-                        instruments=instruments))
-    print(f"ABC written -> {abc_file}")
+        fh.write(to_abc(progression, labels, title=args.title, tempo=args.tempo))
+    print(f"ABC  -> {abc_file}")
 
     if os.system('which abc2pdf > /dev/null 2>&1') == 0:
         pdf = abc_file.replace('.abc', '.pdf')
         os.system(f'abc2pdf -o {pdf} {abc_file}')
-        print(f"PDF written -> {pdf}")
+        print(f"PDF  -> {pdf}")
     elif os.system('which abcm2ps > /dev/null 2>&1') == 0:
         ps = abc_file.replace('.abc', '.ps')
         os.system(f'abcm2ps -O {ps} {abc_file}')
-        print(f"PostScript written -> {ps}")
+        print(f"PS   -> {ps}")
     else:
-        print("Tip: install abc2pdf or abcm2ps to render PDF scores.")
+        print("Tip: install abc2pdf or abcm2ps to render PDF.")
 
-    # --- MIDI output ---
+    # --- MIDI ---
     if not args.no_midi:
         midi_file = args.midi or 'out.mid'
         try:
-            to_midi(progression, midi_file, tempo_bpm=args.tempo)
-            print(f"MIDI written -> {midi_file}")
+            to_midi(progression, labels, midi_file, tempo_bpm=args.tempo)
+            print(f"MIDI -> {midi_file}")
         except ImportError:
-            print("Tip: pip install mido to enable MIDI output.")
+            print("Tip: pip install mido for MIDI output.")
 
 
 if __name__ == '__main__':

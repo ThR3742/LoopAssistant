@@ -4,131 +4,102 @@ Generate ABC notation and MIDI from voiced progressions.
 
 from chords import midi_to_name
 
-# Default labels and clefs per voice ID
-_VOICE_DEFAULTS = {
-    'S': ('Soprano', 'treble'),
-    'A': ('Alto',    'treble'),
-    'T': ('Tenor',   'bass'),
-    'B': ('Bass',    'bass'),
-}
-
 
 def _midi_to_abc(pitch: int) -> str:
     """Convert MIDI pitch to ABC note name with octave markers."""
     name = midi_to_name(pitch)
-    octave = pitch // 12 - 1  # scientific octave (C4 = 60 → octave 4)
+    octave = pitch // 12 - 1
+    base, acc = (name[0], '^') if len(name) == 2 else (name, '')
 
-    if len(name) == 2:  # sharp note
-        base, acc = name[0], '^'
-    else:
-        base, acc = name, ''
-
-    if octave == 5:
-        return acc + base.lower()
-    elif octave == 4:
-        return acc + base
-    elif octave == 3:
-        return acc + base + ','
-    elif octave == 2:
-        return acc + base + ',,'
-    elif octave == 6:
-        return acc + base.lower() + "'"
-    else:
-        diff = octave - 4
-        if diff > 0:
-            return acc + base.lower() + "'" * diff
-        else:
-            return acc + base + ',' * (-diff)
+    if octave == 5:   return acc + base.lower()
+    if octave == 4:   return acc + base
+    if octave == 3:   return acc + base + ','
+    if octave == 2:   return acc + base + ',,'
+    if octave == 6:   return acc + base.lower() + "'"
+    diff = octave - 4
+    if diff > 0:      return acc + base.lower() + "'" * diff
+    return acc + base + ',' * (-diff)
 
 
 def to_abc(progression: list[dict],
+           labels: list[str],
            title: str = "Voice Leading",
            time_sig: str = "4/4",
-           tempo: int = 120,
-           instruments: dict | None = None) -> str:
+           tempo: int = 120) -> str:
     """
-    Generate ABC notation. Voices and their count are inferred from
-    the first entry in the progression.
+    Generate ABC notation.
+    labels: instrument/voice name for each voice (same order as pitches).
     """
     if not progression:
         return ''
 
-    active_voices = list(progression[0]['voices'].keys())
+    n = len(progression[0]['pitches'])
+    # Clef: voices whose median pitch is below C4 (60) go on bass clef
+    def clef_for(voice_idx: int) -> str:
+        pitches = [e['pitches'][voice_idx] for e in progression]
+        return 'bass' if sum(pitches) / len(pitches) < 60 else 'treble'
 
     lines = [
-        f'X:1',
-        f'T:{title}',
-        f'M:{time_sig}',
-        f'L:1/4',
-        f'Q:1/4={tempo}',
-        f'K:C',
+        f'X:1', f'T:{title}', f'M:{time_sig}',
+        f'L:1/4', f'Q:1/4={tempo}', f'K:C',
     ]
+    for i in range(n):
+        label = labels[i] if i < len(labels) else f'Voice {i+1}'
+        lines.append(f'V:{i+1} name="{label}" clef={clef_for(i)}')
 
-    # Voice declarations
-    for i, v in enumerate(active_voices, 1):
-        default_label, default_clef = _VOICE_DEFAULTS.get(v, (v, 'treble'))
-        label = (instruments or {}).get(v, default_label)
-        clef = 'treble' if (instruments or {}).get(v, default_clef) != 'bass' else 'bass'
-        # Re-derive clef from range if not overridden
-        _, clef = _VOICE_DEFAULTS.get(v, (label, 'treble'))
-        lines.append(f'V:{i} name="{label}" clef={clef}')
-
-    # Music data per voice
-    for i, v in enumerate(active_voices, 1):
+    for i in range(n):
         bars = []
         for entry in progression:
-            pitch = entry['voices'][v]
-            abc_note = _midi_to_abc(pitch)
-            if i == 1:
-                bars.append(f'"{entry["chord"]}"' + f'{abc_note}4')
-            else:
-                bars.append(f'{abc_note}4')
-        lines.append(f'[V:{i}] ' + ' | '.join(bars) + ' |]')
+            note = _midi_to_abc(entry['pitches'][i])
+            prefix = f'"{entry["chord"]}"' if i == 0 else ''
+            bars.append(f'{prefix}{note}4')
+        lines.append(f'[V:{i+1}] ' + ' | '.join(bars) + ' |]')
 
     return '\n'.join(lines)
 
 
-def to_midi(progression: list[dict], filename: str, tempo_bpm: int = 120):
-    """Write a MIDI file with one track per active voice."""
+def to_midi(progression: list[dict], labels: list[str],
+            filename: str, tempo_bpm: int = 120):
+    """Write a MIDI file with one track per voice."""
     try:
         import mido
     except ImportError:
-        raise ImportError("Install mido: pip install mido")
+        raise ImportError("pip install mido")
 
     if not progression:
         return
 
-    active_voices = list(progression[0]['voices'].keys())
+    n = len(progression[0]['pitches'])
     mid = mido.MidiFile(ticks_per_beat=480)
     tempo = mido.bpm2tempo(tempo_bpm)
     ticks_per_bar = 4 * 480
 
-    for ch, v in enumerate(active_voices):
+    for i in range(n):
+        label = labels[i] if i < len(labels) else f'Voice {i+1}'
         track = mido.MidiTrack()
         mid.tracks.append(track)
         track.append(mido.MetaMessage('set_tempo', tempo=tempo, time=0))
-        track.append(mido.MetaMessage('track_name', name=v, time=0))
-        track.append(mido.Message('program_change', channel=ch, program=40, time=0))
-
+        track.append(mido.MetaMessage('track_name', name=label, time=0))
+        track.append(mido.Message('program_change', channel=i % 16, program=40, time=0))
         for entry in progression:
-            pitch = entry['voices'][v]
-            track.append(mido.Message('note_on',  channel=ch, note=pitch, velocity=80, time=0))
-            track.append(mido.Message('note_off', channel=ch, note=pitch, velocity=0,  time=ticks_per_bar))
+            p = entry['pitches'][i]
+            track.append(mido.Message('note_on',  channel=i % 16, note=p, velocity=80, time=0))
+            track.append(mido.Message('note_off', channel=i % 16, note=p, velocity=0,  time=ticks_per_bar))
 
     mid.save(filename)
 
 
-def print_table(progression: list[dict]):
-    """Pretty-print voicing table to terminal."""
+def print_table(progression: list[dict], labels: list[str]):
+    """Pretty-print voicing table."""
     if not progression:
         return
-    active_voices = list(progression[0]['voices'].keys())
-    header = f"{'Chord':<12}" + ''.join(f" {v:>6}" for v in active_voices)
+    n = len(progression[0]['pitches'])
+    hdrs = [f'{labels[i] if i < len(labels) else f"V{i+1}":>8}' for i in range(n)]
+    header = f"{'Chord':<12}" + ''.join(hdrs)
     print(header)
     print('-' * len(header))
     for entry in progression:
         row = f"{entry['chord']:<12}"
-        for v in active_voices:
-            p = entry['voices'][v]
-            row += f" {midi_to_name(p) + str(p // 12 - 1):>6}"
+        for p in entry['pitches']:
+            row += f" {midi_to_name(p) + str(p // 12 - 1):>7}"
         print(row)
