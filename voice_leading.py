@@ -113,7 +113,8 @@ def voice_chord(root: str, intervals: list[int],
     return best
 
 
-def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4) -> list[list[int]]:
+def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
+                           avoid_per_chord: list[set[int]] | None = None) -> list[list[int]]:
     """
     Globally optimal arpeggio sequence for one voice over the full progression.
     Each chord gets an n-note run that can be ascending OR descending.
@@ -147,8 +148,14 @@ def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4) -> list
     def _center(w: list[int]) -> float:
         return abs((min(w) + max(w)) / 2 - mid) * 0.2
 
+    def _overlap(w: list[int], ci: int) -> float:
+        if not avoid_per_chord:
+            return 0.0
+        return sum(1 for p in w if p in avoid_per_chord[ci]) * 8.0
+
     # DP: costs[j] = best total cost arriving at window j of the current chord
-    costs = {j: _center(w) for j, w in enumerate(windows_per_chord[0])}
+    costs = {j: _center(w) + _overlap(w, 0)
+             for j, w in enumerate(windows_per_chord[0])}
     back: list[dict[int, int]] = [{}]
 
     for i in range(1, len(windows_per_chord)):
@@ -158,7 +165,8 @@ def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4) -> list
             best_c, best_j = float('inf'), 0
             for j, prev_cost in costs.items():
                 prev_last = windows_per_chord[i - 1][j][-1]
-                c = prev_cost + abs(w_next[0] - prev_last) + _center(w_next)
+                c = (prev_cost + abs(w_next[0] - prev_last)
+                     + _center(w_next) + _overlap(w_next, i))
                 if c < best_c:
                     best_c, best_j = c, j
             new_costs[k] = best_c
@@ -210,11 +218,16 @@ def voice_progression(chords: list[str],
         raw.append((symbol, voicing, cands))
         prev = voicing
 
-    # DP for each arpeggiated voice over the full progression
+    # DP for each arpeggiated voice, in order — later voices avoid notes
+    # already chosen by earlier voices (soft penalty of 8 per shared note).
     arp_seqs_per_voice: dict[int, list[list[int]]] = {}
-    for i in arp:
+    used_per_chord: list[set[int]] = [set() for _ in raw]
+    for i in sorted(arp):
         per_chord = [cands[i] for _, _, cands in raw]
-        arp_seqs_per_voice[i] = _voice_arp_progression(per_chord)
+        seq = _voice_arp_progression(per_chord, avoid_per_chord=used_per_chord)
+        arp_seqs_per_voice[i] = seq
+        for ci, window in enumerate(seq):
+            used_per_chord[ci].update(window)
 
     # Assemble result
     result = []
