@@ -74,10 +74,12 @@ def to_abc(progression: list[dict],
         for entry in progression:
             prefix = f'"{entry["chord"]}"' if i == 0 else ''
             if i in arp:
-                primary = entry['pitches'][i]
-                alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
-                notes   = _arpeggio_notes(primary, [primary] + alts)
-                bar     = ' '.join(_midi_to_abc(p) for p in notes)
+                seq = (entry.get('arp_sequences') or [])[i] if i < len(entry.get('arp_sequences') or []) else None
+                if not seq:
+                    primary = entry['pitches'][i]
+                    alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
+                    seq     = _arpeggio_notes(primary, [primary] + alts)
+                bar = ' '.join(_midi_to_abc(p) for p in seq)
                 voice_bars.append(f'{prefix}{bar}')
             else:
                 note = _midi_to_abc(entry['pitches'][i])
@@ -115,11 +117,12 @@ def to_midi(progression: list[dict], labels: list[str],
         track.append(mido.Message('program_change', channel=i % 16, program=40, time=0))
         for entry in progression:
             if i in arp:
-                primary = entry['pitches'][i]
-                alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
-                notes   = _arpeggio_notes(primary, [primary] + alts)
-                first = True
-                for p in notes:
+                seq = (entry.get('arp_sequences') or [])[i] if i < len(entry.get('arp_sequences') or []) else None
+                if not seq:
+                    primary = entry['pitches'][i]
+                    alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
+                    seq     = _arpeggio_notes(primary, [primary] + alts)
+                for p in seq:
                     track.append(mido.Message('note_on',  channel=i % 16, note=p,
                                               velocity=80, time=0))
                     track.append(mido.Message('note_off', channel=i % 16, note=p,

@@ -113,23 +113,91 @@ def voice_chord(root: str, intervals: list[int],
     return best
 
 
+def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4) -> list[list[int]]:
+    """
+    Globally optimal arpeggio sequence for one voice over the full progression.
+    Each chord gets an n-note run that can be ascending OR descending.
+    Minimises sum of |last[i] → first[i+1]| transitions with a centre-of-range
+    penalty to prevent drift. Ascending + descending patterns let the voice
+    naturally wave up and back down rather than drifting monotonically.
+    """
+    windows_per_chord: list[list[list[int]]] = []
+    for cands in per_chord_cands:
+        pts = sorted(set(cands))
+        if not pts:
+            windows_per_chord.append([[]])
+            continue
+        base = pts if len(pts) >= n else pts + [pts[-1]] * (n - len(pts))
+        if len(base) <= n:
+            windows_per_chord.append([base, list(reversed(base))])
+            continue
+        ws = []
+        for i in range(len(base) - n + 1):
+            asc = base[i:i + n]
+            ws.append(asc)
+            ws.append(list(reversed(asc)))   # descending version
+        windows_per_chord.append(ws)
+
+    if not windows_per_chord:
+        return []
+
+    all_pts = sorted(set(p for c in per_chord_cands for p in c))
+    mid = (all_pts[0] + all_pts[-1]) / 2 if all_pts else 65.0
+
+    def _center(w: list[int]) -> float:
+        return abs((min(w) + max(w)) / 2 - mid) * 0.2
+
+    # DP: costs[j] = best total cost arriving at window j of the current chord
+    costs = {j: _center(w) for j, w in enumerate(windows_per_chord[0])}
+    back: list[dict[int, int]] = [{}]
+
+    for i in range(1, len(windows_per_chord)):
+        new_costs: dict[int, float] = {}
+        new_back:  dict[int, int]   = {}
+        for k, w_next in enumerate(windows_per_chord[i]):
+            best_c, best_j = float('inf'), 0
+            for j, prev_cost in costs.items():
+                prev_last = windows_per_chord[i - 1][j][-1]
+                c = prev_cost + abs(w_next[0] - prev_last) + _center(w_next)
+                if c < best_c:
+                    best_c, best_j = c, j
+            new_costs[k] = best_c
+            new_back[k]  = best_j
+        costs = new_costs
+        back.append(new_back)
+
+    chosen = [min(costs, key=costs.__getitem__)]
+    for i in range(len(windows_per_chord) - 1, 0, -1):
+        chosen.append(back[i][chosen[-1]])
+    chosen.reverse()
+
+    return [windows_per_chord[i][chosen[i]] for i in range(len(windows_per_chord))]
+
+
 def voice_progression(chords: list[str],
-                      ranges: list[tuple[int, int]]) -> list[dict]:
+                      ranges: list[tuple[int, int]],
+                      arpeggio_voices: set[int] | None = None) -> list[dict]:
     """
     Generate voice leading for a chord sequence.
 
     Args:
         chords: list of chord symbols e.g. ['Dm7', 'G7', 'Cmaj7']
         ranges: list of (low, high) MIDI ranges, one per voice
-                (ordered from highest voice to lowest)
+        arpeggio_voices: 0-based indices of voices rendered as arpeggios.
+                         Uses global DP to minimise inter-chord transitions.
 
     Returns:
-        list of dicts  {'chord': str, 'pitches': [int, ...]}
-        pitches are in the same order as ranges.
+        list of dicts with keys:
+          'chord'        – chord symbol
+          'pitches'      – best single note per voice (sustained voice leading)
+          'alternatives' – other chord tones in range per voice
+          'arp_sequences'– 4-note ascending run per arp voice (None for others)
     """
-    result = []
-    prev = None
+    arp = set(arpeggio_voices) if arpeggio_voices else set()
 
+    # First pass: collect voicings and per-chord candidates
+    raw: list[tuple[str, list[int], list[list[int]]]] = []
+    prev = None
     for symbol in chords:
         root, intervals = parse_chord(symbol)
         voicing = voice_chord(root, intervals, ranges, prev)
@@ -139,12 +207,28 @@ def voice_progression(chords: list[str],
                 f"check instrument ranges or reduce voice count."
             )
         cands = _candidates(root, intervals, ranges)
-        result.append({
-            'chord':        symbol,
-            'pitches':      voicing,
-            'alternatives': [[p for p in c if p != voicing[i]]
-                             for i, c in enumerate(cands)],
-        })
+        raw.append((symbol, voicing, cands))
         prev = voicing
+
+    # DP for each arpeggiated voice over the full progression
+    arp_seqs_per_voice: dict[int, list[list[int]]] = {}
+    for i in arp:
+        per_chord = [cands[i] for _, _, cands in raw]
+        arp_seqs_per_voice[i] = _voice_arp_progression(per_chord)
+
+    # Assemble result
+    result = []
+    for ci, (symbol, voicing, cands) in enumerate(raw):
+        arp_seqs: list[list[int] | None] = [
+            arp_seqs_per_voice[i][ci] if i in arp else None
+            for i in range(len(ranges))
+        ]
+        result.append({
+            'chord':         symbol,
+            'pitches':       voicing,
+            'alternatives':  [[p for p in c if p != voicing[i]]
+                              for i, c in enumerate(cands)],
+            'arp_sequences': arp_seqs,
+        })
 
     return result

@@ -127,7 +127,8 @@ def main():
 
     # --- Voice leading ---
     try:
-        progression = voice_progression(chords, ranges)
+        progression = voice_progression(chords, ranges,
+                                        arpeggio_voices=arp_voices or None)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
