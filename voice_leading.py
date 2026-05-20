@@ -113,80 +113,57 @@ def voice_chord(root: str, intervals: list[int],
     return best
 
 
-def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
-                           anchors_per_chord: list[int] | None = None,
-                           avoid_per_chord: list[set[int]] | None = None) -> list[list[int]]:
+def _arp_sequence_for_voice(primaries: list[int],
+                            cands_per_chord: list[list[int]],
+                            n: int = 4) -> list[list[int]]:
     """
-    Globally optimal arpeggio sequence for one voice over the full progression.
-    Each chord gets an n-note run that can be ascending OR descending.
+    Build the arpeggio sequence for one voice over the full progression.
 
-    anchors_per_chord: the voice-led (sustained) note for this voice at each chord.
-      The DP strongly prefers windows that contain or are near the anchor, which
-      keeps each voice centred around its own voice-led note — not an octave copy
-      of another voice.
-    avoid_per_chord: MIDI pitches already used by higher-priority voices (soft penalty).
+    Each chord: take the n chord tones closest to the voice-led primary note
+    (guaranteeing the primary is always present and the voice stays in its own
+    register).  Then choose ascending or descending order via a 2-state DP that
+    minimises |last[chord N] - first[chord N+1]|.  This naturally produces
+    contrary motion when two voices have neighbouring anchors.
     """
-    windows_per_chord: list[list[list[int]]] = []
-    for cands in per_chord_cands:
+    # Step 1: expand each primary into n nearest chord tones (ascending)
+    asc_runs: list[list[int]] = []
+    for primary, cands in zip(primaries, cands_per_chord):
         pts = sorted(set(cands))
         if not pts:
-            windows_per_chord.append([[]])
+            asc_runs.append([primary] * n)
             continue
-        base = pts if len(pts) >= n else pts + [pts[-1]] * (n - len(pts))
-        if len(base) <= n:
-            windows_per_chord.append([base, list(reversed(base))])
-            continue
-        ws = []
-        for i in range(len(base) - n + 1):
-            asc = base[i:i + n]
-            ws.append(asc)
-            ws.append(list(reversed(asc)))
-        windows_per_chord.append(ws)
+        by_dist = sorted(pts, key=lambda p: (abs(p - primary), p))
+        asc_runs.append(sorted(by_dist[:n]))
 
-    if not windows_per_chord:
-        return []
+    # Step 2: 2-state DP — state = direction (0=asc, 1=desc)
+    # costs[d] = best total transition cost arriving with direction d
+    INF = float('inf')
+    costs = [0.0, 0.0]
+    back: list[list[int]] = [[-1, -1]]   # back[chord][dir] = parent direction
 
-    all_pts = sorted(set(p for c in per_chord_cands for p in c))
-    mid = (all_pts[0] + all_pts[-1]) / 2 if all_pts else 65.0
-
-    def _anchor(w: list[int], ci: int) -> float:
-        if not anchors_per_chord:
-            return abs((min(w) + max(w)) / 2 - mid) * 0.2
-        anc = anchors_per_chord[ci]
-        return min(abs(p - anc) for p in w) * 1.5
-
-    def _overlap(w: list[int], ci: int) -> float:
-        if not avoid_per_chord:
-            return 0.0
-        return sum(1 for p in w if p in avoid_per_chord[ci]) * 6.0
-
-    def _cost(w: list[int], ci: int) -> float:
-        return _anchor(w, ci) + _overlap(w, ci)
-
-    costs = {j: _cost(w, 0) for j, w in enumerate(windows_per_chord[0])}
-    back: list[dict[int, int]] = [{}]
-
-    for i in range(1, len(windows_per_chord)):
-        new_costs: dict[int, float] = {}
-        new_back:  dict[int, int]   = {}
-        for k, w_next in enumerate(windows_per_chord[i]):
-            best_c, best_j = float('inf'), 0
-            for j, prev_cost in costs.items():
-                prev_last = windows_per_chord[i - 1][j][-1]
-                c = prev_cost + abs(w_next[0] - prev_last) + _cost(w_next, i)
-                if c < best_c:
-                    best_c, best_j = c, j
-            new_costs[k] = best_c
-            new_back[k]  = best_j
+    for i in range(1, len(asc_runs)):
+        new_costs = [INF, INF]
+        new_back  = [-1,  -1]
+        for d_next in range(2):
+            first_next = asc_runs[i][0] if d_next == 0 else asc_runs[i][-1]
+            for d_prev in range(2):
+                last_prev = asc_runs[i - 1][-1] if d_prev == 0 else asc_runs[i - 1][0]
+                c = costs[d_prev] + abs(first_next - last_prev)
+                if c < new_costs[d_next]:
+                    new_costs[d_next] = c
+                    new_back[d_next]  = d_prev
         costs = new_costs
         back.append(new_back)
 
-    chosen = [min(costs, key=costs.__getitem__)]
-    for i in range(len(windows_per_chord) - 1, 0, -1):
-        chosen.append(back[i][chosen[-1]])
-    chosen.reverse()
+    # Traceback
+    final_d = 0 if costs[0] <= costs[1] else 1
+    dirs = [final_d]
+    for i in range(len(asc_runs) - 1, 0, -1):
+        dirs.append(back[i][dirs[-1]])
+    dirs.reverse()
 
-    return [windows_per_chord[i][chosen[i]] for i in range(len(windows_per_chord))]
+    return [asc_runs[i] if dirs[i] == 0 else list(reversed(asc_runs[i]))
+            for i in range(len(asc_runs))]
 
 
 def voice_progression(chords: list[str],
@@ -225,19 +202,13 @@ def voice_progression(chords: list[str],
         raw.append((symbol, voicing, cands))
         prev = voicing
 
-    # DP for each arpeggiated voice, in order — later voices avoid notes
-    # already chosen by earlier voices (soft penalty of 8 per shared note).
+    # Arpeggio: expand each voice-led note into n nearest chord tones,
+    # choose ascending/descending per chord to minimise inter-chord jumps.
     arp_seqs_per_voice: dict[int, list[list[int]]] = {}
-    used_per_chord: list[set[int]] = [set() for _ in raw]
-    for i in sorted(arp):
-        per_chord  = [cands[i]    for _, _,       cands   in raw]
-        anchors    = [voicing[i]  for _, voicing, _       in raw]
-        seq = _voice_arp_progression(per_chord,
-                                     anchors_per_chord=anchors,
-                                     avoid_per_chord=used_per_chord)
-        arp_seqs_per_voice[i] = seq
-        for ci, window in enumerate(seq):
-            used_per_chord[ci].update(window)
+    for i in arp:
+        primaries      = [voicing[i] for _, voicing, _     in raw]
+        cands_per_chord = [cands[i]  for _, _,       cands in raw]
+        arp_seqs_per_voice[i] = _arp_sequence_for_voice(primaries, cands_per_chord)
 
     # Assemble result
     result = []
