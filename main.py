@@ -125,16 +125,20 @@ def main():
         fh.write(to_abc(progression, labels, title=args.title, tempo=args.tempo))
     print(f"ABC  -> {abc_file}")
 
+    pdf = abc_file.replace('.abc', '.pdf')
     if os.system('which abc2pdf > /dev/null 2>&1') == 0:
-        pdf = abc_file.replace('.abc', '.pdf')
         os.system(f'abc2pdf -o {pdf} {abc_file}')
         print(f"PDF  -> {pdf}")
     elif os.system('which abcm2ps > /dev/null 2>&1') == 0:
         ps = abc_file.replace('.abc', '.ps')
         os.system(f'abcm2ps -O {ps} {abc_file}')
-        print(f"PS   -> {ps}")
+        if os.system('which ps2pdf > /dev/null 2>&1') == 0:
+            os.system(f'ps2pdf {ps} {pdf}')
+            print(f"PDF  -> {pdf}")
+        else:
+            print(f"PS   -> {ps}  (install ghostscript for PDF)")
     else:
-        print("Tip: install abc2pdf or abcm2ps to render PDF.")
+        print("Tip: install abcm2ps + ghostscript to render PDF.")
 
     # --- MIDI ---
     if not args.no_midi:
