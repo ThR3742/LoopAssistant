@@ -138,7 +138,13 @@ def voice_progression(chords: list[str],
                 f"Could not voice '{symbol}' with {len(ranges)} voices — "
                 f"check instrument ranges or reduce voice count."
             )
-        result.append({'chord': symbol, 'pitches': voicing})
+        cands = _candidates(root, intervals, ranges)
+        result.append({
+            'chord':        symbol,
+            'pitches':      voicing,
+            'alternatives': [[p for p in c if p != voicing[i]]
+                             for i, c in enumerate(cands)],
+        })
         prev = voicing
 
     return result

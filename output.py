@@ -30,23 +30,38 @@ def _midi_to_abc(pitch: int) -> str:
     return acc + base + ',' * (-diff)
 
 
+def _arpeggio_notes(primary: int, all_pitches: list[int], n: int = 4) -> list[int]:
+    """Return n chord tones closest to primary, sorted ascending (no octave wrapping)."""
+    pitches = sorted(set(all_pitches))
+    if not pitches:
+        return [primary] * n
+    if len(pitches) <= n:
+        return pitches + [pitches[-1]] * (n - len(pitches))
+    by_dist = sorted(pitches, key=lambda p: (abs(p - primary), p))
+    return sorted(by_dist[:n])
+
+
 def to_abc(progression: list[dict],
            labels: list[str],
            title: str = "Voice Leading",
            time_sig: str = "4/4",
-           tempo: int = 120) -> str:
+           tempo: int = 120,
+           arpeggio_voices: set[int] | None = None) -> str:
     """
     Generate ABC notation.
-    labels: instrument/voice name for each voice (same order as pitches).
+    arpeggio_voices: 0-based set of voice indices to render as 4-note ascending arpeggios.
+                     Other voices get a single whole note. None = all sustained.
     """
     if not progression:
         return ''
 
+    arp = arpeggio_voices or set()
     n = len(progression[0]['pitches'])
+    bars_per_line = 4 if arp else 8
     lines = [
         f'X:1', f'T:{title}', f'M:{time_sig}',
         f'L:1/4', f'Q:1/4={tempo}', f'K:C',
-        f'%%barsperline 8',
+        f'%%barsperline {bars_per_line}',
         f'%%stretchlast 0',
     ]
     for i in range(n):
@@ -57,16 +72,24 @@ def to_abc(progression: list[dict],
     for i in range(n):
         voice_bars = []
         for entry in progression:
-            note = _midi_to_abc(entry['pitches'][i])
             prefix = f'"{entry["chord"]}"' if i == 0 else ''
-            voice_bars.append(f'{prefix}{note}4')
+            if i in arp:
+                primary = entry['pitches'][i]
+                alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
+                notes   = _arpeggio_notes(primary, [primary] + alts)
+                bar     = ' '.join(_midi_to_abc(p) for p in notes)
+                voice_bars.append(f'{prefix}{bar}')
+            else:
+                note = _midi_to_abc(entry['pitches'][i])
+                voice_bars.append(f'{prefix}{note}4')
         lines.append(f'[V:{i+1}] ' + ' | '.join(voice_bars) + ' |]')
 
     return '\n'.join(lines)
 
 
 def to_midi(progression: list[dict], labels: list[str],
-            filename: str, tempo_bpm: int = 120):
+            filename: str, tempo_bpm: int = 120,
+            arpeggio_voices: set[int] | None = None):
     """Write a MIDI file with one track per voice."""
     try:
         import mido
@@ -76,10 +99,12 @@ def to_midi(progression: list[dict], labels: list[str],
     if not progression:
         return
 
+    arp = arpeggio_voices or set()
     n = len(progression[0]['pitches'])
     mid = mido.MidiFile(ticks_per_beat=480)
     tempo = mido.bpm2tempo(tempo_bpm)
     ticks_per_bar = 4 * 480
+    ticks_per_note = ticks_per_bar // 4
 
     for i in range(n):
         label = labels[i] if i < len(labels) else f'Voice {i+1}'
@@ -89,24 +114,46 @@ def to_midi(progression: list[dict], labels: list[str],
         track.append(mido.MetaMessage('track_name', name=label, time=0))
         track.append(mido.Message('program_change', channel=i % 16, program=40, time=0))
         for entry in progression:
-            p = entry['pitches'][i]
-            track.append(mido.Message('note_on',  channel=i % 16, note=p, velocity=80, time=0))
-            track.append(mido.Message('note_off', channel=i % 16, note=p, velocity=0,  time=ticks_per_bar))
+            if i in arp:
+                primary = entry['pitches'][i]
+                alts    = entry.get('alternatives', [[] for _ in range(n)])[i]
+                notes   = _arpeggio_notes(primary, [primary] + alts)
+                first = True
+                for p in notes:
+                    track.append(mido.Message('note_on',  channel=i % 16, note=p,
+                                              velocity=80, time=0))
+                    track.append(mido.Message('note_off', channel=i % 16, note=p,
+                                              velocity=0,  time=ticks_per_note))
+            else:
+                p = entry['pitches'][i]
+                track.append(mido.Message('note_on',  channel=i % 16, note=p, velocity=80, time=0))
+                track.append(mido.Message('note_off', channel=i % 16, note=p, velocity=0,  time=ticks_per_bar))
 
     mid.save(filename)
 
 
 def print_table(progression: list[dict], labels: list[str]):
-    """Pretty-print voicing table."""
+    """Pretty-print voicing table with available arpeggio tones."""
     if not progression:
         return
     n = len(progression[0]['pitches'])
-    hdrs = [f'{labels[i] if i < len(labels) else f"V{i+1}":>8}' for i in range(n)]
+    has_alts = 'alternatives' in progression[0]
+    col_w = 20 if has_alts else 8
+    hdrs = [f'{(labels[i] if i < len(labels) else f"V{i+1}"):>{col_w}}' for i in range(n)]
     header = f"{'Chord':<12}" + ''.join(hdrs)
     print(header)
     print('-' * len(header))
     for entry in progression:
         row = f"{entry['chord']:<12}"
-        for p in entry['pitches']:
-            row += f" {midi_to_name(p) + str(p // 12 - 1):>7}"
+        for j, p in enumerate(entry['pitches']):
+            primary_str = midi_to_name(p) + str(p // 12 - 1)
+            if has_alts:
+                alts = entry['alternatives'][j]
+                by_dist = sorted(alts, key=lambda a: (abs(a - p), a))[:3]
+                by_dist_asc = sorted(by_dist)
+                rest = [midi_to_name(a) + str(a // 12 - 1) for a in by_dist_asc]
+                cell = f'{primary_str}({" ".join(rest)})' if rest else primary_str
+            else:
+                cell = primary_str
+            row += f' {cell:>{col_w}}'
         print(row)

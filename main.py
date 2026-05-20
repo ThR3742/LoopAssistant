@@ -76,6 +76,9 @@ def main():
     parser.add_argument('--title',         default='Loop Assistant')
     parser.add_argument('--tempo',         type=int, default=120)
     parser.add_argument('--no-midi',       action='store_true')
+    parser.add_argument('--arpeggio', '-a', nargs='?', const='all', default=None,
+                        metavar='VOICES',
+                        help='Arpeggiate voices: omit for all, or "1,3" for specific voices')
 
     args = parser.parse_args()
 
@@ -109,6 +112,19 @@ def main():
     print(f"Chords  ({len(chords)}): {' | '.join(chords)}")
     print(f"Voices  ({len(labels)}): {' | '.join(labels)}\n")
 
+    # --- Arpeggio voices ---
+    n_voices = len(labels)
+    arp_voices: set[int] = set()
+    if args.arpeggio == 'all':
+        arp_voices = set(range(n_voices))
+    elif args.arpeggio:
+        for part in args.arpeggio.split(','):
+            part = part.strip()
+            if part.isdigit():
+                idx = int(part) - 1
+                if 0 <= idx < n_voices:
+                    arp_voices.add(idx)
+
     # --- Voice leading ---
     try:
         progression = voice_progression(chords, ranges)
@@ -122,7 +138,8 @@ def main():
     # --- ABC ---
     abc_file = args.abc or 'out.abc'
     with open(abc_file, 'w') as fh:
-        fh.write(to_abc(progression, labels, title=args.title, tempo=args.tempo))
+        fh.write(to_abc(progression, labels, title=args.title, tempo=args.tempo,
+                        arpeggio_voices=arp_voices or None))
     print(f"ABC  -> {abc_file}")
 
     pdf = abc_file.replace('.abc', '.pdf')
@@ -144,7 +161,8 @@ def main():
     if not args.no_midi:
         midi_file = args.midi or 'out.mid'
         try:
-            to_midi(progression, labels, midi_file, tempo_bpm=args.tempo)
+            to_midi(progression, labels, midi_file, tempo_bpm=args.tempo,
+                    arpeggio_voices=arp_voices or None)
             print(f"MIDI -> {midi_file}")
         except ImportError:
             print("Tip: pip install mido for MIDI output.")
