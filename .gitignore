@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+out.abc
+out.mid
+*.pdf
+*.ps
