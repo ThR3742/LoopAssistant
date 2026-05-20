@@ -114,13 +114,17 @@ def voice_chord(root: str, intervals: list[int],
 
 
 def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
+                           anchors_per_chord: list[int] | None = None,
                            avoid_per_chord: list[set[int]] | None = None) -> list[list[int]]:
     """
     Globally optimal arpeggio sequence for one voice over the full progression.
     Each chord gets an n-note run that can be ascending OR descending.
-    Minimises sum of |last[i] → first[i+1]| transitions with a centre-of-range
-    penalty to prevent drift. Ascending + descending patterns let the voice
-    naturally wave up and back down rather than drifting monotonically.
+
+    anchors_per_chord: the voice-led (sustained) note for this voice at each chord.
+      The DP strongly prefers windows that contain or are near the anchor, which
+      keeps each voice centred around its own voice-led note — not an octave copy
+      of another voice.
+    avoid_per_chord: MIDI pitches already used by higher-priority voices (soft penalty).
     """
     windows_per_chord: list[list[list[int]]] = []
     for cands in per_chord_cands:
@@ -136,7 +140,7 @@ def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
         for i in range(len(base) - n + 1):
             asc = base[i:i + n]
             ws.append(asc)
-            ws.append(list(reversed(asc)))   # descending version
+            ws.append(list(reversed(asc)))
         windows_per_chord.append(ws)
 
     if not windows_per_chord:
@@ -145,17 +149,21 @@ def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
     all_pts = sorted(set(p for c in per_chord_cands for p in c))
     mid = (all_pts[0] + all_pts[-1]) / 2 if all_pts else 65.0
 
-    def _center(w: list[int]) -> float:
-        return abs((min(w) + max(w)) / 2 - mid) * 0.2
+    def _anchor(w: list[int], ci: int) -> float:
+        if not anchors_per_chord:
+            return abs((min(w) + max(w)) / 2 - mid) * 0.2
+        anc = anchors_per_chord[ci]
+        return min(abs(p - anc) for p in w) * 1.5
 
     def _overlap(w: list[int], ci: int) -> float:
         if not avoid_per_chord:
             return 0.0
-        return sum(1 for p in w if p in avoid_per_chord[ci]) * 8.0
+        return sum(1 for p in w if p in avoid_per_chord[ci]) * 6.0
 
-    # DP: costs[j] = best total cost arriving at window j of the current chord
-    costs = {j: _center(w) + _overlap(w, 0)
-             for j, w in enumerate(windows_per_chord[0])}
+    def _cost(w: list[int], ci: int) -> float:
+        return _anchor(w, ci) + _overlap(w, ci)
+
+    costs = {j: _cost(w, 0) for j, w in enumerate(windows_per_chord[0])}
     back: list[dict[int, int]] = [{}]
 
     for i in range(1, len(windows_per_chord)):
@@ -165,8 +173,7 @@ def _voice_arp_progression(per_chord_cands: list[list[int]], n: int = 4,
             best_c, best_j = float('inf'), 0
             for j, prev_cost in costs.items():
                 prev_last = windows_per_chord[i - 1][j][-1]
-                c = (prev_cost + abs(w_next[0] - prev_last)
-                     + _center(w_next) + _overlap(w_next, i))
+                c = prev_cost + abs(w_next[0] - prev_last) + _cost(w_next, i)
                 if c < best_c:
                     best_c, best_j = c, j
             new_costs[k] = best_c
@@ -223,8 +230,11 @@ def voice_progression(chords: list[str],
     arp_seqs_per_voice: dict[int, list[list[int]]] = {}
     used_per_chord: list[set[int]] = [set() for _ in raw]
     for i in sorted(arp):
-        per_chord = [cands[i] for _, _, cands in raw]
-        seq = _voice_arp_progression(per_chord, avoid_per_chord=used_per_chord)
+        per_chord  = [cands[i]    for _, _,       cands   in raw]
+        anchors    = [voicing[i]  for _, voicing, _       in raw]
+        seq = _voice_arp_progression(per_chord,
+                                     anchors_per_chord=anchors,
+                                     avoid_per_chord=used_per_chord)
         arp_seqs_per_voice[i] = seq
         for ci, window in enumerate(seq):
             used_per_chord[ci].update(window)
